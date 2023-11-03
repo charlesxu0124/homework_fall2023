@@ -13,11 +13,11 @@ import numpy as np
 import torch
 from cs285.infrastructure import pytorch_util as ptu
 import tqdm
+import wandb
 
 from cs285.infrastructure import utils
 from cs285.infrastructure.logger import Logger
 from cs285.infrastructure.replay_buffer import MemoryEfficientReplayBuffer, ReplayBuffer
-
 from scripting_utils import make_logger, make_config
 
 MAX_NVIDEO = 2
@@ -91,21 +91,33 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         epsilon = exploration_schedule.value(step)
         
         # TODO(student): Compute action
-        action = ...
+        action = agent.get_action(observation, epsilon)
 
         # TODO(student): Step the environment
+        next_observation, reward, done, info = env.step(action)
 
         next_observation = np.asarray(next_observation)
         truncated = info.get("TimeLimit.truncated", False)
-
+        
         # TODO(student): Add the data to the replay buffer
         if isinstance(replay_buffer, MemoryEfficientReplayBuffer):
             # We're using the memory-efficient replay buffer,
             # so we only insert next_observation (not observation)
-            ...
+            replay_buffer.insert(
+                action=action,
+                reward=reward,
+                next_observation=next_observation[-1],
+                done=done and not truncated,
+            )
         else:
             # We're using the regular replay buffer
-            ...
+            replay_buffer.insert(
+                observation=observation,
+                action=action,
+                reward=reward,
+                next_observation=next_observation,
+                done=done and not truncated,
+            )
 
         # Handle episode termination
         if done:
@@ -113,19 +125,28 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
             logger.log_scalar(info["episode"]["r"], "train_return", step)
             logger.log_scalar(info["episode"]["l"], "train_ep_len", step)
+            wandb.log({"train_ep_len": info["episode"]["l"],
+                       "train_return": info["episode"]["r"]},
+                        step=step)
         else:
             observation = next_observation
 
         # Main DQN training loop
         if step >= config["learning_starts"]:
             # TODO(student): Sample config["batch_size"] samples from the replay buffer
-            batch = ...
+            batch = replay_buffer.sample(config["batch_size"])
 
             # Convert to PyTorch tensors
             batch = ptu.from_numpy(batch)
 
             # TODO(student): Train the agent. `batch` is a dictionary of numpy arrays,
-            update_info = ...
+            update_info = agent.update(batch['observations'], 
+                                       batch['actions'], 
+                                       batch['rewards'], 
+                                       batch['next_observations'], 
+                                       batch['dones'],
+                                       step,
+                                       )
 
             # Logging code
             update_info["epsilon"] = epsilon
@@ -135,6 +156,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                 for k, v in update_info.items():
                     logger.log_scalar(v, k, step)
                 logger.flush()
+                wandb.log(update_info, step=step)
 
         if step % args.eval_interval == 0:
             # Evaluate
@@ -149,7 +171,10 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
             logger.log_scalar(np.mean(returns), "eval_return", step)
             logger.log_scalar(np.mean(ep_lens), "eval_ep_len", step)
-
+            wandb.log({"eval_ep_len": np.mean(ep_lens),
+                       "eval_return": np.mean(returns)},
+                        step=step)
+            print(f"Eval average return: {np.mean(returns)}")
             if len(returns) > 1:
                 logger.log_scalar(np.std(returns), "eval/return_std", step)
                 logger.log_scalar(np.max(returns), "eval/return_max", step)
@@ -157,7 +182,13 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                 logger.log_scalar(np.std(ep_lens), "eval/ep_len_std", step)
                 logger.log_scalar(np.max(ep_lens), "eval/ep_len_max", step)
                 logger.log_scalar(np.min(ep_lens), "eval/ep_len_min", step)
-
+                wandb.log({"eval/return_std": np.std(returns),
+                           "eval/return_max": np.max(returns),
+                           "eval/return_min": np.min(returns),
+                           "eval/ep_len_std": np.std(ep_lens),
+                           "eval/ep_len_max": np.max(ep_lens),
+                           "eval/ep_len_min": np.min(ep_lens)},
+                            step=step)
             if args.num_render_trajectories > 0:
                 video_trajectories = utils.sample_n_trajectories(
                     render_env,
@@ -174,6 +205,8 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                     max_videos_to_save=args.num_render_trajectories,
                     video_title="eval_rollouts",
                 )
+                video_frames = np.concatenate([traj['image_obs'] for traj in video_trajectories], axis=0).transpose(0, 3, 1, 2)
+                wandb.log({"eval_rollouts": wandb.Video(video_frames, fps=fps)}, step=step)
 
 
 def main():
@@ -196,7 +229,12 @@ def main():
 
     config = make_config(args.config_file)
     logger = make_logger(logdir_prefix, config)
-
+    wandb.init(project="cs285_hw3", 
+        name=logdir_prefix + config["log_name"],
+        mode="online",
+        entity="charlesxu0124",
+        config=args
+        )
     run_training_loop(config, logger, args)
 
 

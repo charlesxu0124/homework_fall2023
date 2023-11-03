@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from cs285.infrastructure import pytorch_util as ptu
 import tqdm
+import wandb
 
 from cs285.infrastructure import utils
 from cs285.infrastructure.logger import Logger
@@ -68,7 +69,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
             action = env.action_space.sample()
         else:
             # TODO(student): Select an action
-            action = ...
+            action = agent.get_action(observation)
 
         # Step the environment and add the data to the replay buffer
         next_observation, reward, done, info = env.step(action)
@@ -90,8 +91,16 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
         # Train the agent
         if step >= config["training_starts"]:
             # TODO(student): Sample a batch of config["batch_size"] transitions from the replay buffer
-            batch = ...
-            update_info = ...
+            batch = replay_buffer.sample(config["batch_size"])
+            batch = ptu.from_numpy(batch)
+            update_info = agent.update(
+                batch["observations"],
+                batch["actions"],
+                batch["rewards"],
+                batch["next_observations"],
+                batch["dones"],
+                step
+            )
 
             # Logging
             update_info["actor_lr"] = agent.actor_lr_scheduler.get_last_lr()[0]
@@ -102,6 +111,7 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                     logger.log_scalar(v, k, step)
                     logger.log_scalars
                 logger.flush()
+                wandb.log(update_info, step=step)
 
         # Run evaluation
         if step % args.eval_interval == 0:
@@ -116,6 +126,10 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
 
             logger.log_scalar(np.mean(returns), "eval_return", step)
             logger.log_scalar(np.mean(ep_lens), "eval_ep_len", step)
+            wandb.log({"eval_ep_len": np.mean(ep_lens),
+                       "eval_return": np.mean(returns)},
+                        step=step)
+            print(f"Eval average return: {np.mean(returns)}")
 
             if len(returns) > 1:
                 logger.log_scalar(np.std(returns), "eval/return_std", step)
@@ -124,6 +138,13 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                 logger.log_scalar(np.std(ep_lens), "eval/ep_len_std", step)
                 logger.log_scalar(np.max(ep_lens), "eval/ep_len_max", step)
                 logger.log_scalar(np.min(ep_lens), "eval/ep_len_min", step)
+                wandb.log({"eval/return_std": np.std(returns),
+                           "eval/return_max": np.max(returns),
+                           "eval/return_min": np.min(returns),
+                           "eval/ep_len_std": np.std(ep_lens),
+                           "eval/ep_len_max": np.max(ep_lens),
+                           "eval/ep_len_min": np.min(ep_lens)},
+                            step=step)
 
             if args.num_render_trajectories > 0:
                 video_trajectories = utils.sample_n_trajectories(
@@ -141,6 +162,8 @@ def run_training_loop(config: dict, logger: Logger, args: argparse.Namespace):
                     max_videos_to_save=args.num_render_trajectories,
                     video_title="eval_rollouts",
                 )
+                video_frames = np.concatenate([traj['image_obs'] for traj in video_trajectories], axis=0).transpose(0, 3, 1, 2)
+                wandb.log({"eval_rollouts": wandb.Video(video_frames, fps=fps)}, step=step)
 
 
 def main():
@@ -163,7 +186,12 @@ def main():
 
     config = make_config(args.config_file)
     logger = make_logger(logdir_prefix, config)
-
+    wandb.init(project="cs285_hw3", 
+        name=logdir_prefix + config["log_name"],
+        mode="online",
+        entity="charlesxu0124",
+        config=args
+        )
     run_training_loop(config, logger, args)
 
 

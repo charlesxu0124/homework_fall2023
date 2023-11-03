@@ -1,14 +1,11 @@
 import os
 import time
 
-import tqdm
-
 from cs285.agents.pg_agent import PGAgent
 
 import os
 import time
 
-import wandb
 import gym
 import numpy as np
 import torch
@@ -23,26 +20,14 @@ MAX_NVIDEO = 2
 
 def run_training_loop(args):
     logger = Logger(args.logdir)
-    wandb.init(project="cs285_hw2", 
-               name=args.exp_name,
-               mode="online",
-               entity="charlesxu0124",
-               config=args
-               )
 
     # set random seeds
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu)
-    
-    
-    env = gym.make(args.env_name, render_mode=None)
-    max_ep_len = args.ep_len or env.spec.max_episode_steps
+
     # make the gym environment
-    if args.vectorize_env:
-        num_env = min(8, args.batch_size//max_ep_len)
-        # breakpoint()
-        env = gym.vector.make(args.env_name, num_envs=num_env, render_mode=None)
+    env = gym.make(args.env_name, render_mode=None)
     discrete = isinstance(env.action_space, gym.spaces.Discrete)
 
     # add action noise, if needed
@@ -50,15 +35,16 @@ def run_training_loop(args):
         assert not discrete, f"Cannot use --action_noise_std for discrete environment {args.env_name}"
         env = ActionNoiseWrapper(env, args.seed, args.action_noise_std)
 
-    ob_dim = env.observation_space.shape[-1]
-    ac_dim = env.action_space.n if discrete else env.action_space.shape[-1]
+    max_ep_len = args.ep_len or env.spec.max_episode_steps
+
+    ob_dim = env.observation_space.shape[0]
+    ac_dim = env.action_space.n if discrete else env.action_space.shape[0]
 
     # simulation timestep, will be used for video saving
-    if not args.vectorize_env:
-        if hasattr(env, "model"):
-            fps = 1 / env.model.opt.timestep
-        else:
-            fps = env.env.metadata["render_fps"]
+    if hasattr(env, "model"):
+        fps = 1 / env.model.opt.timestep
+    else:
+        fps = env.env.metadata["render_fps"]
 
     # initialize agent
     agent = PGAgent(
@@ -80,19 +66,13 @@ def run_training_loop(args):
     total_envsteps = 0
     start_time = time.time()
 
-    for itr in tqdm.tqdm(range(args.n_iter)):
+    for itr in range(args.n_iter):
         print(f"\n********** Iteration {itr} ************")
         # TODO: sample `args.batch_size` transitions using utils.sample_trajectories
         # make sure to use `max_ep_len`
-        # breakpoint()
-        if args.vectorize_env:
-            trajs, envsteps_this_batch = utils.sample_trajectories_vectorized(
-                env, agent.actor, args.batch_size, max_ep_len
-            )
-        else:
-            trajs, envsteps_this_batch = utils.sample_trajectories(
-                env, agent.actor, args.batch_size, max_ep_len
-            )
+        trajs, envsteps_this_batch = utils.sample_trajectories(
+            env, agent.actor, args.batch_size, max_ep_len
+        )
         total_envsteps += envsteps_this_batch
 
         # trajs should be a list of dictionaries of NumPy arrays, where each dictionary corresponds to a trajectory.
@@ -110,14 +90,9 @@ def run_training_loop(args):
         if itr % args.scalar_log_freq == 0:
             # save eval metrics
             print("\nCollecting data for eval...")
-            if args.vectorize_env:
-                eval_trajs, eval_envsteps_this_batch = utils.sample_trajectories_vectorized(
-                    env, agent.actor, args.eval_batch_size, max_ep_len
-                )
-            else:
-                eval_trajs, eval_envsteps_this_batch = utils.sample_trajectories(
-                    env, agent.actor, args.eval_batch_size, max_ep_len
-                )
+            eval_trajs, eval_envsteps_this_batch = utils.sample_trajectories(
+                env, agent.actor, args.eval_batch_size, max_ep_len
+            )
 
             logs = utils.compute_metrics(trajs, eval_trajs)
             # compute additional metrics
@@ -128,12 +103,11 @@ def run_training_loop(args):
                 logs["Initial_DataCollection_AverageReturn"] = logs[
                     "Train_AverageReturn"
                 ]
-
             # perform the logging
             for key, value in logs.items():
                 print("{} : {}".format(key, value))
                 logger.log_scalar(value, key, itr)
-            wandb.log(logs)
+                
             print("Done logging...\n\n")
 
             logger.flush()
@@ -189,7 +163,6 @@ def main():
     parser.add_argument("--scalar_log_freq", type=int, default=1)
 
     parser.add_argument("--action_noise_std", type=float, default=0)
-    parser.add_argument("--vectorize_env", action="store_true")
 
     args = parser.parse_args()
 

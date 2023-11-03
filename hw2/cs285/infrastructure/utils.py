@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import numpy as np
 import copy
 from cs285.networks.policies import MLPPolicy
@@ -15,7 +15,7 @@ def sample_trajectory(
     env: gym.Env, policy: MLPPolicy, max_length: int, render: bool = False
 ) -> Dict[str, np.ndarray]:
     """Sample a rollout in the environment from a policy."""
-    ob = env.reset()
+    ob, _ = env.reset()
     obs, acs, rewards, next_obs, terminals, image_obs = [], [], [], [], [], []
     steps = 0
     while True:
@@ -30,14 +30,15 @@ def sample_trajectory(
             )
 
         # TODO use the most recent ob and the policy to decide what to do
-        ac: np.ndarray = None
+
+        ac = policy.get_action(ob)
 
         # TODO: use that action to take a step in the environment
-        next_ob, rew, done, _ = None, None, None, None
+        next_ob, rew, done, _, _ = env.step(ac)
 
         # TODO rollout can end due to done, or due to max_length
         steps += 1
-        rollout_done: bool = None
+        rollout_done: bool = done or steps >= max_length
 
         # record result of taking that action
         obs.append(ob)
@@ -145,3 +146,64 @@ def convert_listofrollouts(trajs):
 
 def get_traj_length(traj):
     return len(traj["reward"])
+
+
+
+def sample_trajectories_vectorized(
+    env: gym.Env,
+    policy: MLPPolicy,
+    min_timesteps_per_batch: int,
+    max_length: int,
+    render: bool = False,
+) -> Tuple[List[Dict[str, np.ndarray]], int]:
+    """Collect rollouts using policy until we have collected min_timesteps_per_batch steps."""
+    timesteps_this_batch = 0
+    trajs = []
+
+    while timesteps_this_batch < min_timesteps_per_batch:
+        traj = sample_trajectory_vectorized(env, policy, max_length, render)
+        trajs.extend(traj)
+        timesteps_this_batch += sum([len(t["action"]) for t in traj])
+
+    return trajs, timesteps_this_batch
+
+def sample_trajectory_vectorized(
+    env: gym.Env, policy: MLPPolicy, max_length: int, render: bool = False
+) -> List[Dict[str, np.ndarray]]:
+    """Sample a rollout in the environment from a policy."""
+    obs, _ = env.reset()
+    num_envs = env.num_envs
+    trajs = [defaultdict(list) for _ in range(num_envs)]
+
+    for _ in range(max_length):
+        # Render
+        if render:
+            img = env.render(mode="single_rgb_array")
+            for idx, single_img in enumerate(img):
+                image = cv2.resize(single_img, dsize=(250, 250), interpolation=cv2.INTER_CUBIC)
+                trajs[idx]["image_obs"].append(image)
+
+        # Get actions using the policy
+        acs = policy.get_action(obs)
+        # Step the environments
+        next_obs, rews, dones, _, _ = env.step(acs)
+
+        # Store observations, actions, etc.
+        for idx in range(num_envs):
+            trajs[idx]["observation"].append(obs[idx])
+            trajs[idx]["action"].append(acs[idx])
+            trajs[idx]["reward"].append(rews[idx])
+            trajs[idx]["next_observation"].append(next_obs[idx])
+            trajs[idx]["terminal"].append(dones[idx])
+
+        obs = next_obs
+
+    # Convert lists to numpy arrays
+    for traj in trajs:
+        for key, value in traj.items():
+            if key == "image_obs":
+                traj[key] = np.array(value, dtype=np.uint8)
+            else:
+                traj[key] = np.array(value, dtype=np.float32)
+
+    return trajs
