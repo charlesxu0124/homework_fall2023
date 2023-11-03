@@ -213,6 +213,13 @@ class SoftActorCritic(nn.Module):
             # Compute the target Q-value
             target_values: torch.Tensor = reward + (~done) * self.discount * next_qs
 
+            # Compute the target Q-value
+            target_values: torch.Tensor = ...
+            assert target_values.shape == (
+                self.num_critic_networks,
+                batch_size
+            )
+
         # TODO(student): Update the critic
         # Predict Q-values
         q_values = self.critic(obs, action)
